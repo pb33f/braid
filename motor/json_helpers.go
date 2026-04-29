@@ -71,7 +71,5 @@ func (h *jsonHelper) skipArray(decoder HARDecoder) error {
 }
 
 func newHARDecoder(r io.Reader) HARDecoder {
-	d := json.NewDecoder(r)
-	d.UseNumber()
-	return &StdlibDecoder{decoder: d}
+	return &StdlibDecoder{decoder: json.NewDecoder(r)}
 }

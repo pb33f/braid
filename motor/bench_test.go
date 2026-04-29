@@ -150,6 +150,18 @@ func BenchmarkIndexBuild_500MB(b *testing.B) {
 	b.Skip("skipping 500MB test - no generator function available")
 }
 
+func BenchmarkIndexBuild_LargeBodies(b *testing.B) {
+	benchmarkIndexBuild(b, func() (string, func(), error) {
+		return generateLargeBodyHAR(300)
+	})
+}
+
+func BenchmarkIndexBuild_FewLargeBodies(b *testing.B) {
+	benchmarkIndexBuild(b, func() (string, func(), error) {
+		return generateLargeBodyHAR(50)
+	})
+}
+
 func benchmarkIndexBuild(b *testing.B, generateFunc func() (string, func(), error)) {
 	harFile, cleanup, err := generateFunc()
 	if err != nil {
@@ -158,6 +170,7 @@ func benchmarkIndexBuild(b *testing.B, generateFunc func() (string, func(), erro
 	defer cleanup()
 
 	b.ReportAllocs()
+	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		opts := DefaultStreamerOptions()

@@ -2,6 +2,7 @@ package motor
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,10 +41,6 @@ func TestIndexBuilder_Build_5MB(t *testing.T) {
 		t.Error("expected positive file size")
 	}
 
-	if index.FileHash == "" {
-		t.Error("expected non-empty file hash")
-	}
-
 	if len(index.Entries) != index.TotalEntries {
 		t.Errorf("expected %d entries, got %d", index.TotalEntries, len(index.Entries))
 	}
@@ -52,8 +49,39 @@ func TestIndexBuilder_Build_5MB(t *testing.T) {
 		t.Error("expected positive build time")
 	}
 
-	t.Logf("built index: %d entries, %d bytes, hash: %s, build time: %v",
-		index.TotalEntries, index.FileSize, index.FileHash, index.BuildTime)
+	t.Logf("built index: %d entries, %d bytes, build time: %v",
+		index.TotalEntries, index.FileSize, index.BuildTime)
+}
+
+func TestIndexBuilder_Build_ValidEmptyEntries(t *testing.T) {
+	builder := NewIndexBuilder("empty.har")
+	index, err := builder.Build(strings.NewReader(`{"log":{"version":"1.2","entries":[]}}`))
+	if err != nil {
+		t.Fatalf("expected valid empty HAR to parse: %v", err)
+	}
+	if index.TotalEntries != 0 {
+		t.Fatalf("expected zero entries, got %d", index.TotalEntries)
+	}
+}
+
+func TestIndexBuilder_Build_RejectsMalformedJSON(t *testing.T) {
+	tests := map[string]string{
+		"invalid json":              `not valid json`,
+		"truncated entries array":   `{"log":{"version":"1.2","entries":[`,
+		"missing entries close":     `{"log":{"version":"1.2","entries":[{} }`,
+		"missing log root close":    `{"log":{"version":"1.2","entries":[]`,
+		"trailing token after root": `{"log":{"version":"1.2","entries":[]}} false`,
+	}
+
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			builder := NewIndexBuilder(name + ".har")
+			_, err := builder.Build(strings.NewReader(content))
+			if err == nil {
+				t.Fatal("expected malformed HAR to fail")
+			}
+		})
+	}
 }
 
 func TestIndexBuilder_Build_50MB(t *testing.T) {

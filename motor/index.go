@@ -6,34 +6,39 @@ import (
 	"io"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"github.com/pb33f/harific/motor/model"
 )
 
 const (
-	keyLog               = "log"
-	keyVersion           = "version"
-	keyCreator           = "creator"
-	keyBrowser           = "browser"
-	keyPages             = "pages"
-	keyEntries           = "entries"
-	keyStartedDateTime   = "startedDateTime"
-	keyTime              = "time"
-	keyRequest           = "request"
-	keyResponse          = "response"
-	keyPageRef           = "pageref"
-	keyServerIPAddress   = "serverIPAddress"
-	keyConnection        = "connection"
-	keyMethod            = "method"
-	keyURL               = "url"
-	keyBodySize          = "bodySize"
-	keyStatus            = "status"
-	keyStatusText        = "statusText"
-	keyContent           = "content"
-	keySize              = "size"
-	keyMimeType          = "mimeType"
-	keyText              = "text"
-	keyEncoding          = "encoding"
+	keyLog             = "log"
+	keyVersion         = "version"
+	keyCreator         = "creator"
+	keyBrowser         = "browser"
+	keyPages           = "pages"
+	keyEntries         = "entries"
+	keyStartedDateTime = "startedDateTime"
+	keyTime            = "time"
+	keyRequest         = "request"
+	keyResponse        = "response"
+	keyPageRef         = "pageref"
+	keyServerIPAddress = "serverIPAddress"
+	keyConnection      = "connection"
+	keyMethod          = "method"
+	keyURL             = "url"
+	keyBodySize        = "bodySize"
+	keyStatus          = "status"
+	keyStatusText      = "statusText"
+	keyContent         = "content"
+	keySize            = "size"
+	keyMimeType        = "mimeType"
+	keyText            = "text"
+	keyEncoding        = "encoding"
+)
+
+const (
+	bytesPerEntryEstimate = 1_000_000
+	minEntriesEstimate    = 64
+	maxEntriesEstimate    = 100_000
 )
 
 // IndexProgress represents indexing progress
@@ -45,7 +50,6 @@ type IndexProgress struct {
 
 type DefaultIndexBuilder struct {
 	index        *Index
-	hash         *xxhash.Digest
 	bytesRead    int64
 	totalBytes   int64
 	progressChan chan<- IndexProgress
@@ -55,10 +59,8 @@ func NewIndexBuilder(filePath string) *DefaultIndexBuilder {
 	return &DefaultIndexBuilder{
 		index: &Index{
 			FilePath:     filePath,
-			Entries:      make([]*EntryMetadata, 0),
 			IndexVersion: 1,
 		},
-		hash: xxhash.New(),
 	}
 }
 
@@ -77,21 +79,29 @@ func (b *DefaultIndexBuilder) BuildWithProgress(reader io.Reader, totalBytes int
 		defer close(progressChan)
 	}
 
-	hashReader := &hashingReader{
-		reader: reader,
-		hash:   b.hash,
+	estimated := minEntriesEstimate
+	if totalBytes > 0 {
+		estimated = int(totalBytes / bytesPerEntryEstimate)
+		if estimated < minEntriesEstimate {
+			estimated = minEntriesEstimate
+		}
+		if estimated > maxEntriesEstimate {
+			estimated = maxEntriesEstimate
+		}
 	}
+	b.index.Entries = make([]*EntryMetadata, 0, estimated)
 
-	if err := b.parseHAR(hashReader); err != nil {
+	counter := &countingReader{reader: reader}
+
+	if err := b.parseHAR(counter); err != nil {
 		return nil, fmt.Errorf("failed to parse har file: %w", err)
 	}
 
-	b.index.FileHash = fmt.Sprintf("%x", b.hash.Sum64())
-	b.index.FileSize = hashReader.bytesRead
+	b.index.FileSize = counter.bytesRead
 	b.index.BuildTime = time.Since(startTime)
 	b.index.TotalEntries = len(b.index.Entries)
 
-	urlSet := make(map[string]struct{})
+	urlSet := make(map[string]struct{}, len(b.index.Entries))
 	for _, entry := range b.index.Entries {
 		urlSet[entry.URL] = struct{}{}
 	}
@@ -103,8 +113,12 @@ func (b *DefaultIndexBuilder) BuildWithProgress(reader io.Reader, totalBytes int
 func (b *DefaultIndexBuilder) parseHAR(reader io.Reader) error {
 	decoder := newHARDecoder(reader)
 
-	if _, err := decoder.Token(); err != nil {
+	token, err := decoder.Token()
+	if err != nil {
 		return err
+	}
+	if token != json.Delim('{') {
+		return fmt.Errorf("expected HAR root object delimiter, got %v", token)
 	}
 
 	for decoder.More() {
@@ -130,12 +144,28 @@ func (b *DefaultIndexBuilder) parseHAR(reader io.Reader) error {
 		}
 	}
 
+	if err := consumeDelim(decoder, json.Delim('}'), "HAR root object"); err != nil {
+		return err
+	}
+
+	token, err = decoder.Token()
+	if err == nil {
+		return fmt.Errorf("unexpected trailing JSON token after HAR root: %v", token)
+	}
+	if err != io.EOF {
+		return err
+	}
+
 	return nil
 }
 
 func (b *DefaultIndexBuilder) parseLog(decoder HARDecoder) error {
-	if _, err := decoder.Token(); err != nil {
+	token, err := decoder.Token()
+	if err != nil {
 		return err
+	}
+	if token != json.Delim('{') {
+		return fmt.Errorf("expected log object delimiter, got %v", token)
 	}
 
 	for decoder.More() {
@@ -179,6 +209,10 @@ func (b *DefaultIndexBuilder) parseLog(decoder HARDecoder) error {
 				return err
 			}
 		}
+	}
+
+	if err := consumeDelim(decoder, json.Delim('}'), "log object"); err != nil {
+		return err
 	}
 
 	return nil
@@ -234,11 +268,29 @@ func (b *DefaultIndexBuilder) parseEntries(decoder HARDecoder) error {
 		}
 	}
 
-	// send final progress update
+	if err := consumeDelim(decoder, json.Delim(']'), "entries array"); err != nil {
+		return err
+	}
+
+	// send final progress update after the entries array has closed cleanly
 	if trackProgress {
 		b.sendProgressUpdate(decoder.InputOffset(), entryIndex, 0, 0, &lastProgressBytes)
 	}
 
+	return nil
+}
+
+func consumeDelim(decoder HARDecoder, expected json.Delim, context string) error {
+	token, err := decoder.Token()
+	if err != nil {
+		if err == io.EOF {
+			return fmt.Errorf("expected closing delimiter %q for %s: %w", expected, context, io.ErrUnexpectedEOF)
+		}
+		return fmt.Errorf("expected closing delimiter %q for %s: %w", expected, context, err)
+	}
+	if token != expected {
+		return fmt.Errorf("expected closing delimiter %q for %s, got %v", expected, context, token)
+	}
 	return nil
 }
 
@@ -351,8 +403,7 @@ func (b *DefaultIndexBuilder) parseEntryMetadata(decoder HARDecoder, index int, 
 		}
 	}
 
-	// consume closing brace
-	if _, err := decoder.Token(); err != nil {
+	if err := consumeDelim(decoder, json.Delim('}'), "entry object"); err != nil {
 		return nil, err
 	}
 
@@ -408,8 +459,7 @@ func (b *DefaultIndexBuilder) parseRequest(decoder HARDecoder, metadata *EntryMe
 		}
 	}
 
-	// consume closing brace
-	if _, err := decoder.Token(); err != nil {
+	if err := consumeDelim(decoder, json.Delim('}'), "request object"); err != nil {
 		return err
 	}
 
@@ -468,8 +518,7 @@ func (b *DefaultIndexBuilder) parseResponse(decoder HARDecoder, metadata *EntryM
 		}
 	}
 
-	// consume closing brace
-	if _, err := decoder.Token(); err != nil {
+	if err := consumeDelim(decoder, json.Delim('}'), "response object"); err != nil {
 		return err
 	}
 
@@ -525,8 +574,7 @@ func (b *DefaultIndexBuilder) parseResponseContent(decoder HARDecoder, metadata 
 		}
 	}
 
-	// consume closing brace
-	if _, err := decoder.Token(); err != nil {
+	if err := consumeDelim(decoder, json.Delim('}'), "response content object"); err != nil {
 		return err
 	}
 
@@ -543,17 +591,13 @@ func (b *DefaultIndexBuilder) GetIndex() *Index {
 	return b.index
 }
 
-type hashingReader struct {
+type countingReader struct {
 	reader    io.Reader
-	hash      *xxhash.Digest
 	bytesRead int64
 }
 
-func (r *hashingReader) Read(p []byte) (n int, err error) {
+func (r *countingReader) Read(p []byte) (n int, err error) {
 	n, err = r.reader.Read(p)
 	r.bytesRead += int64(n)
-	if n > 0 && r.hash != nil {
-		r.hash.Write(p[:n])
-	}
 	return n, err
 }
