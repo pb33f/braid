@@ -2,6 +2,8 @@ package motor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,4 +121,21 @@ func TestInitializedStreamer_WorksNormally(t *testing.T) {
 		count++
 	}
 	assert.Equal(t, 5, count)
+}
+
+func TestInitializeRejectsTruncatedHAR(t *testing.T) {
+	harFile := filepath.Join(t.TempDir(), "truncated.har")
+	err := os.WriteFile(harFile, []byte(`{
+  "log": {
+    "version": "1.2",
+    "entries": [
+`), 0644)
+	require.NoError(t, err)
+
+	streamer, err := NewHARStreamer(harFile, DefaultStreamerOptions())
+	require.NoError(t, err)
+
+	err = streamer.Initialize(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build index")
 }

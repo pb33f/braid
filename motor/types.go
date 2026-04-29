@@ -29,7 +29,6 @@ type EntryMetadata struct {
 type Index struct {
 	FilePath           string
 	FileSize           int64
-	FileHash           string
 	IndexVersion       int
 	Version            string
 	Creator            *model.Creator

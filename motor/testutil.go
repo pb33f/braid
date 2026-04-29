@@ -45,3 +45,28 @@ func generateMediumHAR() (string, func(), error) {
 func generateTinyHAR() (string, func(), error) {
 	return generateTestHAR(10, 42)
 }
+
+// generateLargeBodyHAR generates a HAR file with FatMode entries (~100KB each)
+// for benchmarking the indexer skip path on large response bodies.
+func generateLargeBodyHAR(entries int) (string, func(), error) {
+	opts := hargen.GenerateOptions{
+		EntryCount:     entries,
+		Seed:           42,
+		InjectTerms:    []string{},
+		MaxJSONDepth:   3,
+		MaxJSONNodes:   10,
+		FatMode:        true,
+		DictionaryPath: "/usr/share/dict/words",
+	}
+
+	result, err := hargen.Generate(opts)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to generate large-body HAR: %w", err)
+	}
+
+	cleanup := func() {
+		os.Remove(result.HARFilePath)
+	}
+
+	return result.HARFilePath, cleanup, nil
+}
